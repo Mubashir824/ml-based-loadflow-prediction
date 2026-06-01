@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IEEE 14-Bus ML Load Flow Analyzer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ── LOADING OVERLAY ── -->
+<div id="global-loader" class="d-none">
+    <div class="loader-content">
+        <div class="loader-spinner-wrap">
+            <i class="fas fa-network-wired fa-2x text-info"></i>
+        </div>
+        <h4 id="loading-text" class="fw-bold mb-3">Initializing...</h4>
+        <div class="progress mx-auto mb-3" style="width:280px">
+            <div class="progress-bar" id="loading-bar" style="width:0%"></div>
+        </div>
+        <div style="font-size:0.7rem;color:#334155;font-family:'JetBrains Mono',monospace;letter-spacing:0.3px">
+            XGBoost · LightGBM · CatBoost &mdash; in-process ensemble inference
+        </div>
+    </div>
+</div>
+
+<!-- ── NAVBAR ── -->
+<nav class="navbar navbar-dark glass-nav">
+    <div class="container-fluid">
+        <span class="navbar-brand mb-0 h1">
+            <i class="fas fa-network-wired text-info me-2"></i>
+            IEEE 14-Bus <span class="text-info">ML Analyzer</span>
+        </span>
+        <div class="d-flex align-items-center gap-3">
+            <span class="small d-none d-md-inline" style="color:#475569;font-size:0.72rem">
+                NED University · EED · Batch 2022
+            </span>
+            <span id="server-status" class="small">
+                <i class="fas fa-circle-notch fa-spin text-muted me-1"></i>
+                <span class="text-muted">Checking...</span>
+            </span>
+        </div>
+    </div>
+</nav>
+
+<!-- ── MAIN ── -->
+<div class="container-fluid py-4 px-4">
+
+    <!-- TABS -->
+    <ul class="nav nav-tabs custom-tabs mb-4" id="myTab" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="input-tab"
+                    data-bs-toggle="tab" data-bs-target="#input-panel" type="button">
+                <i class="fas fa-sliders-h me-2 text-info"></i>1. Data Entry
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="dashboard-tab"
+                    data-bs-toggle="tab" data-bs-target="#dashboard-panel" type="button">
+                <i class="fas fa-chart-line me-2 text-info"></i>2. Dashboard &amp; Results
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="compare-tab"
+                    data-bs-toggle="tab" data-bs-target="#compare-panel" type="button">
+                <i class="fas fa-balance-scale me-2 text-warning"></i>3. AI vs Newton-Raphson
+            </button>
+        </li>
+    </ul>
+
+    <div class="tab-content" id="myTabContent">
+
+        <!-- ═══════════════ TAB 1 — DATA ENTRY ═══════════════ -->
+        <div class="tab-pane fade show active" id="input-panel" role="tabpanel">
+            <div class="row g-4 mb-4">
+
+                <div class="col-lg-5">
+                    <div class="glass-card p-4 h-100">
+                        <h5 class="mb-3 text-info"><i class="fas fa-project-diagram me-2"></i>System Topology</h5>
+                        <label class="form-label small mb-1" style="color:#94a3b8">Select Contingency Scenario</label>
+                        <select class="form-select mb-3" id="topology-select" onchange="updateImage()"></select>
+                        <div class="image-showcase d-flex align-items-center justify-content-center" style="min-height:240px">
+                            <img id="manual-topology-img" src="/static/images/0.png" class="topology-diagram" alt="System Topology">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-7">
+                    <div class="glass-card p-4 h-100">
+                        <h5 class="mb-3 text-info"><i class="fas fa-keyboard me-2"></i>Manual Configuration</h5>
+                        <div class="row g-2" id="manual-inputs-container"></div>
+                        <button class="btn btn-primary w-100 mt-3 py-2" onclick="submitSingle()">
+                            <i class="fas fa-play me-2"></i>Run Load Flow Analysis
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-4">
+                <div class="col-12">
+                    <div class="glass-card p-4">
+                        <h5 class="text-success mb-1"><i class="fas fa-layer-group me-2"></i>Time-Series Batch Analysis</h5>
+                        <p class="mb-4" style="color:#64748b;font-size:0.85rem">
+                            Upload a dataset of multi-hour scenarios (CSV, XLSX, Parquet). Each row = 1 hour. Max 8,760 rows.
+                        </p>
+                        <div id="drop-zone" class="text-center mb-3"
+                             onclick="document.getElementById('file-upload').click()">
+                            <i class="fas fa-cloud-upload-alt fa-2x text-info mb-2 d-block"></i>
+                            <div class="fw-semibold mb-1">Drag &amp; drop your file here</div>
+                            <div class="mb-2" style="font-size:0.82rem;color:#64748b">or click to browse</div>
+                            <div id="file-name-display">No file selected</div>
+                        </div>
+                        <input type="file" id="file-upload" class="d-none" accept=".csv,.xlsx,.xls,.parquet">
+                        <div class="row justify-content-center">
+                            <div class="col-md-5">
+                                <button class="btn btn-success w-100 py-2" onclick="submitBatch()">
+                                    <i class="fas fa-rocket me-2"></i>Upload &amp; Run Batch Inference
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════ TAB 2 — DASHBOARD ═══════════════ -->
+        <div class="tab-pane fade" id="dashboard-panel" role="tabpanel">
+
+            <!-- Batch summary -->
+            <div id="batch-summary" class="glass-card p-3 mb-4 d-none">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h6 class="mb-0 text-info"><i class="fas fa-table me-2"></i>Batch Run Summary</h6>
+                    <button class="btn btn-sm btn-outline-info export-btn d-none" onclick="exportResults()">
+                        <i class="fas fa-download me-1"></i>Export CSV
+                    </button>
+                </div>
+                <div class="row g-3">
+                    <div class="col-6 col-md-2">
+                        <div class="stat-card">
+                            <div class="stat-value" id="bs-avg-p">—</div>
+                            <div class="stat-label">Avg P Loss (MW)</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-2">
+                        <div class="stat-card">
+                            <div class="stat-value" id="bs-violations">—</div>
+                            <div class="stat-label">Violation Hours</div>
+                        </div>
+                    </div>
+                    <!-- Clickable worst hour -->
+                    <div class="col-6 col-md-2">
+                        <div class="stat-card clickable" id="stat-worst-card" title="Click to jump">
+                            <div class="stat-value text-danger" id="bs-worst-hour">—</div>
+                            <div class="stat-label">Worst Hour <i class="fas fa-arrow-right ms-1" style="font-size:0.6rem"></i></div>
+                            <div class="stat-label mt-1" id="bs-worst-val" style="color:#f43f5e">—</div>
+                        </div>
+                    </div>
+                    <!-- Clickable best hour -->
+                    <div class="col-6 col-md-2">
+                        <div class="stat-card clickable" id="stat-best-card" title="Click to jump">
+                            <div class="stat-value text-success" id="bs-best-hour">—</div>
+                            <div class="stat-label">Best Hour <i class="fas fa-arrow-right ms-1" style="font-size:0.6rem"></i></div>
+                            <div class="stat-label mt-1" id="bs-best-val" style="color:#22c55e">—</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Single export -->
+            <div class="d-flex justify-content-end mb-3">
+                <button class="btn btn-sm btn-outline-info export-btn d-none" onclick="exportResults()">
+                    <i class="fas fa-download me-1"></i>Export CSV
+                </button>
+            </div>
+
+            <!-- Time-series controller -->
+            <div class="glass-card p-3 mb-4 d-none" id="ts-controller">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="mb-0 text-info"><i class="fas fa-clock me-2"></i>Time-Series Playback</h6>
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="speed-control">
+                            <span>Speed</span>
+                            <input type="range" id="speed-slider" min="200" max="3000" step="100" value="800" style="width:70px">
+                            <span id="speed-label">800ms</span>
+                        </div>
+                        <span class="kb-hint d-none d-md-inline">
+                            <kbd>←</kbd><kbd>→</kbd> navigate &nbsp;<kbd>Space</kbd> play
+                        </span>
+                        <span style="font-family:monospace;color:#94a3b8;font-size:0.9rem">
+                            Hour <span id="current-hour-display" class="text-warning fw-bold">1</span>
+                            / <span id="total-hours-display">1</span>
+                        </span>
+                    </div>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <button class="btn btn-sm btn-outline-info px-3" onclick="changeHour(-1)"><i class="fas fa-chevron-left"></i></button>
+                    <input type="range" class="form-range flex-grow-1" id="hour-slider" min="1" max="1" value="1" oninput="updateDashboardForHour(this.value)">
+                    <button class="btn btn-sm btn-outline-info px-3" onclick="changeHour(1)"><i class="fas fa-chevron-right"></i></button>
+                    <button id="autoplay-btn" class="btn btn-sm btn-outline-warning px-3" onclick="toggleAutoPlay()">
+                        <i class="fas fa-play me-1"></i>Auto
+                    </button>
+                    <div class="d-flex align-items-center gap-1" style="min-width:130px">
+                        <input type="number" id="jump-hour-input" class="form-control form-control-sm text-center"
+                               placeholder="Hour #" min="1" style="width:70px;font-family:monospace"
+                               onkeydown="if(event.key==='Enter') jumpToHourInput()">
+                        <button class="btn btn-sm btn-outline-info px-2" onclick="jumpToHourInput()" title="Jump to hour">
+                            <i class="fas fa-crosshairs"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Dashboard grid -->
+            <div class="row g-4">
+                <div class="col-lg-3">
+                    <div class="glass-card p-3 h-100">
+                        <h6 class="chart-title mb-3">Active Topology</h6>
+                        <div class="image-showcase mb-2">
+                            <img id="topology-img" src="/static/images/0.png" class="topology-diagram" alt="Topology">
+                        </div>
+                        <p id="topo-label" class="text-center small fw-semibold mb-3 mt-2">—</p>
+
+                        <div class="p-3 rounded mb-3" style="background:rgba(0,0,0,0.28);border:1px solid var(--glass-border)">
+                            <div class="loss-section-heading mb-2">Hour <span id="sum-hour">1</span> — System Losses</div>
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <span class="small text-danger"><i class="fas fa-fire me-1"></i>Active Loss</span>
+                                <span class="fw-bold text-danger" style="font-family:monospace"><span id="sum-p-loss">0.0000</span> MW</span>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="small" style="color:#8b5cf6"><i class="fas fa-wave-square me-1"></i>Reactive Loss</span>
+                                <span class="fw-bold" style="color:#8b5cf6;font-family:monospace"><span id="sum-q-loss">0.0000</span> MVAR</span>
+                            </div>
+                        </div>
+
+                        <div class="p-2 rounded mb-2" style="background:rgba(0,0,0,0.2);border:1px solid var(--glass-border)">
+                            <div class="mb-2" style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">
+                                <i class="fas fa-exclamation-triangle me-1"></i>Voltage Violations (ANSI)
+                            </div>
+                            <div id="violation-box" class="small text-success">
+                                <i class="fas fa-check-circle me-1"></i>Awaiting results...
+                            </div>
+                        </div>
+
+                        <div class="p-2 rounded mb-2" style="background:rgba(0,0,0,0.2);border:1px solid var(--glass-border)">
+                            <div class="mb-1" style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">
+                                <i class="fas fa-fire-alt me-1"></i>Highest Line Loss
+                            </div>
+                            <div id="most-loaded-line" style="color:#64748b;font-size:0.8rem">—</div>
+                        </div>
+                        <div class="p-2 rounded" style="background:rgba(0,0,0,0.2);border:1px solid var(--glass-border)">
+                            <div class="mb-1" style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">
+                                <i class="fas fa-bolt me-1"></i>Highest Line Current
+                            </div>
+                            <div id="most-loaded-current" style="color:#64748b;font-size:0.8rem">—</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-9">
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <div class="glass-card p-3">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <div class="chart-title mb-0">Voltage Profile — Bus 1 (Slack) to Bus 14 (p.u.)</div>
+                                    <span style="font-size:0.68rem;color:#475569;font-family:monospace">
+                                        <span style="color:#22c55e">◆</span> Slack &nbsp;<span style="color:#f43f5e">●</span> Violation
+                                    </span>
+                                </div>
+                                <canvas id="voltageChart" height="80"></canvas>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="glass-card p-3">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <div class="chart-title mb-0">Phase Angles — Bus 1 to 14 (°)</div>
+                                    <span style="font-size:0.68rem;color:#475569;font-family:monospace"><span style="color:#22c55e">■</span> Slack = 0°</span>
+                                </div>
+                                <canvas id="angleChart" height="130"></canvas>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="glass-card p-3">
+                                <div class="chart-title">Active P Loss — 15 Transmission Lines (MW)</div>
+                                <canvas id="lossChart" height="130"></canvas>
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <div class="glass-card p-3">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <div class="chart-title mb-0"><i class="fas fa-bolt me-1 text-warning"></i>Line Currents — 15 Lines (kA)</div>
+                                    <span style="font-size:0.68rem;color:#475569;font-family:monospace">
+                                        <span style="color:#22c55e">■</span> &lt;50% &nbsp;
+                                        <span style="color:#f59e0b">■</span> 50–80% &nbsp;
+                                        <span style="color:#f43f5e">■</span> &gt;80%
+                                    </span>
+                                </div>
+                                <canvas id="currentChart" height="60"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════ TAB 3 — COMPARE ═══════════════ -->
+        <div class="tab-pane fade" id="compare-panel" role="tabpanel">
+
+            <!-- Hero banner -->
+            <div class="glass-card p-4 mb-4" style="border-left:3px solid var(--warning)">
+                <div class="row align-items-center">
+                    <div class="col-md-8">
+                        <h4 class="mb-1" style="font-weight:800">
+                            <i class="fas fa-balance-scale text-warning me-2"></i>
+                            AI Prediction vs. Newton-Raphson Load Flow
+                        </h4>
+                        <p class="mb-0" style="color:#94a3b8;font-size:0.88rem">
+                            Enter bus load values and a contingency scenario, then run both the ML ensemble model
+                            and the traditional Newton-Raphson solver (<code style="color:#06b6d4">pandapower</code>)
+                            side-by-side. Error metrics are computed automatically so you can quantify how closely
+                            the ML model approximates the conventional solution.
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-center text-md-end mt-3 mt-md-0">
+                        <div class="d-flex gap-2 justify-content-center justify-content-md-end">
+                            <span class="badge" style="background:rgba(6,182,212,0.2);color:#06b6d4;border:1px solid rgba(6,182,212,0.4);font-size:0.75rem;padding:0.4rem 0.8rem">
+                                <i class="fas fa-brain me-1"></i>ML Ensemble
+                            </span>
+                            <span style="color:#64748b;align-self:center">vs</span>
+                            <span class="badge" style="background:rgba(245,158,11,0.2);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);font-size:0.75rem;padding:0.4rem 0.8rem">
+                                <i class="fas fa-calculator me-1"></i>Newton-Raphson
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input section -->
+            <div class="glass-card p-4 mb-4">
+                <div class="row g-3 align-items-start">
+                    <div class="col-lg-3">
+                        <h6 class="text-info mb-2"><i class="fas fa-project-diagram me-2"></i>Topology</h6>
+                        <select class="form-select" id="cmp-topology-select" onchange="applyCompareLocking(this.value)"></select>
+                        <p class="mt-2 mb-0" style="font-size:0.72rem;color:#475569">
+                            <i class="fas fa-lock me-1"></i>Load contingencies auto-lock the tripped bus inputs.
+                        </p>
+                    </div>
+                    <div class="col-lg-9">
+                        <h6 class="text-info mb-2"><i class="fas fa-bolt me-2"></i>Active Power Injections P1–P11 (MW)</h6>
+                        <div class="row g-2 mb-3">
+                            <!-- 11 P inputs -->
+                            <script>for(let i=1;i<=11;i++){document.write(`<div class="col"><label class="small text-info d-block text-center mb-1">P${i}</label><input type="number" id="cmp-P${i}" class="form-control form-control-sm text-center" value="0" step="0.01"></div>`);}</script>
+                        </div>
+                        <h6 class="text-warning mb-2"><i class="fas fa-wave-square me-2"></i>Reactive Power Injections Q1–Q11 (MVAR)</h6>
+                        <div class="row g-2">
+                            <!-- 11 Q inputs -->
+                            <script>for(let i=1;i<=11;i++){document.write(`<div class="col"><label class="small text-warning d-block text-center mb-1">Q${i}</label><input type="number" id="cmp-Q${i}" class="form-control form-control-sm text-center" value="0" step="0.01"></div>`);}</script>
+                        </div>
+                    </div>
+                </div>
+                <div class="row mt-4">
+                    <div class="col-md-5">
+                        <button id="run-compare-btn" class="btn btn-compare w-100 py-2" onclick="runComparison()">
+                            <i class="fas fa-balance-scale me-2"></i>Run Comparison
+                        </button>
+                    </div>
+                    <div class="col-md-7 d-flex align-items-center mt-2 mt-md-0">
+                        <p class="mb-0" style="font-size:0.75rem;color:#475569">
+                            <i class="fas fa-info-circle me-1 text-info"></i>
+                            This spawns pandapower's Newton-Raphson solver in an isolated process alongside the ML ensemble prediction.
+                            Requires <code style="color:#06b6d4">pandapower</code> to be installed.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- File upload for batch compare -->
+            <div class="glass-card p-4 mb-4" style="border-left:3px solid rgba(139,92,246,0.5)">
+                <h6 class="text-info mb-1"><i class="fas fa-layer-group me-2"></i>Batch Compare from File</h6>
+                <p class="mb-3" style="color:#64748b;font-size:0.82rem">
+                    Upload a dataset (CSV, XLSX, Parquet). Only the first <strong class="text-warning">10 rows</strong> will be compared (NR solver is slow). Remaining rows are ignored.
+                </p>
+                <div class="row align-items-center g-3">
+                    <div class="col-md-6">
+                        <div id="cmp-drop-zone" class="text-center py-3 px-2"
+                             style="border:2px dashed rgba(139,92,246,0.35);border-radius:10px;cursor:pointer"
+                             onclick="document.getElementById('cmp-file-upload').click()"
+                             ondragover="event.preventDefault();this.style.borderColor='#8b5cf6'"
+                             ondragleave="this.style.borderColor='rgba(139,92,246,0.35)'"
+                             ondrop="handleCmpDrop(event)">
+                            <i class="fas fa-cloud-upload-alt text-info mb-1 d-block"></i>
+                            <div class="small fw-semibold">Drag &amp; drop or click</div>
+                            <div id="cmp-file-name" style="font-family:monospace;font-size:0.75rem;color:#8b5cf6;min-height:1.2em">No file selected</div>
+                        </div>
+                        <input type="file" id="cmp-file-upload" class="d-none" accept=".csv,.xlsx,.xls,.parquet"
+                               onchange="setCmpFileName(this.files[0])">
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-compare w-100 py-2" onclick="runBatchCompare()">
+                            <i class="fas fa-layer-group me-2"></i>Batch Compare
+                        </button>
+                    </div>
+                    <div id="cmp-batch-status" class="col-md-3 small" style="color:#64748b">
+                        Upload a file and click Batch Compare.
+                    </div>
+                </div>
+
+                <!-- Batch compare results table (shown after run) -->
+                <div id="cmp-batch-results" class="d-none mt-4">
+                    <div class="table-responsive">
+                        <table class="table table-dark compare-table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Topology</th>
+                                    <th style="color:#06b6d4">ML Total P Loss (MW)</th>
+                                    <th style="color:#f59e0b">NR Total P Loss (MW)</th>
+                                    <th style="color:#f43f5e">|ΔP| (MW)</th>
+                                    <th style="color:#8b5cf6">ML Total Q Loss (MVAR)</th>
+                                    <th style="color:#f59e0b">NR Total Q Loss (MVAR)</th>
+                                    <th style="color:#f43f5e">|ΔQ| (MVAR)</th>
+                                    <th style="color:#94a3b8">V MAE (p.u.)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cmp-batch-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results panel (hidden until compare runs) -->            <!-- Results panel (hidden until compare runs) -->
+            <div id="compare-results-panel" class="d-none">
+
+                <!-- KPI headline row -->
+                <div class="glass-card p-4 mb-4">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h5 class="mb-1" style="font-weight:800">Comparison Results</h5>
+                            <div id="cmp-topo-label" style="font-size:0.82rem">—</div>
+                        </div>
+                        <div class="text-end">
+                            <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Voltage Accuracy</div>
+                            <div class="fw-bold text-success" style="font-family:'JetBrains Mono',monospace;font-size:1.6rem" id="cmp-accuracy-pct">—</div>
+                            <div class="accuracy-bar-track mt-1" style="width:120px;margin-left:auto">
+                                <div class="accuracy-bar-fill" id="cmp-accuracy-bar" style="width:0%"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Error metric pills -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-6 col-md-2">
+                            <div class="metric-pill">
+                                <div class="metric-val text-info" id="cmp-v-mae">—</div>
+                                <div class="metric-lbl">Voltage MAE (p.u.)</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-2">
+                            <div class="metric-pill">
+                                <div class="metric-val text-warning" id="cmp-v-rmse">—</div>
+                                <div class="metric-lbl">Voltage RMSE</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-2">
+                            <div class="metric-pill">
+                                <div class="metric-val text-danger" id="cmp-v-max">—</div>
+                                <div class="metric-lbl">Max V Error</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-2">
+                            <div class="metric-pill">
+                                <div class="metric-val text-warning" id="cmp-p-mae">—</div>
+                                <div class="metric-lbl">P-Loss MAE (MW)</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-2">
+                            <div class="metric-pill">
+                                <div class="metric-val text-danger" id="cmp-p-rmse">—</div>
+                                <div class="metric-lbl">P-Loss RMSE</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-2">
+                            <div class="metric-pill">
+                                <div class="metric-val" style="color:#8b5cf6" id="cmp-q-mae">—</div>
+                                <div class="metric-lbl">Q-Loss MAE (MVAR)</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Total P loss cards -->
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div class="p-3 rounded compare-ml" style="background:rgba(6,182,212,0.05)">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">ML Ensemble — Total P Loss</div>
+                                <div class="fw-bold text-info mt-1" style="font-family:'JetBrains Mono',monospace;font-size:1.2rem"><span id="cmp-ml-total-p">—</span> MW</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded compare-nr" style="background:rgba(245,158,11,0.05)">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Newton-Raphson — Total P Loss</div>
+                                <div class="fw-bold text-warning mt-1" style="font-family:'JetBrains Mono',monospace;font-size:1.2rem"><span id="cmp-nr-total-p">—</span> MW</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded compare-err" style="background:rgba(244,63,94,0.05)">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Absolute Error</div>
+                                <div class="fw-bold text-danger mt-1" style="font-family:'JetBrains Mono',monospace;font-size:1.2rem"><span id="cmp-err-total-p">—</span> MW</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Total Q loss cards -->
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-4">
+                            <div class="p-3 rounded" style="background:rgba(139,92,246,0.05);border:1px solid rgba(139,92,246,0.2)">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">ML Ensemble — Total Q Loss</div>
+                                <div class="fw-bold mt-1" style="color:#8b5cf6;font-family:'JetBrains Mono',monospace;font-size:1.2rem"><span id="cmp-ml-total-q">—</span> MVAR</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded" style="background:rgba(245,158,11,0.05);border:1px solid rgba(245,158,11,0.2)">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Newton-Raphson — Total Q Loss</div>
+                                <div class="fw-bold text-warning mt-1" style="font-family:'JetBrains Mono',monospace;font-size:1.2rem"><span id="cmp-nr-total-q">—</span> MVAR</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded" style="background:rgba(244,63,94,0.05);border:1px solid rgba(244,63,94,0.2)">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Absolute Error</div>
+                                <div class="fw-bold text-danger mt-1" style="font-family:'JetBrains Mono',monospace;font-size:1.2rem"><span id="cmp-err-total-q">—</span> MVAR</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div><!-- /compare-results-panel (KPIs only) -->
+
+            <!-- Charts row — ALWAYS VISIBLE as placeholders, populated after comparison runs -->
+            <div class="row g-4 mb-4 mt-0" id="cmp-charts-row">
+                <div class="col-12">
+                    <div class="glass-card p-3">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <div class="chart-title mb-0">Voltage Profile Comparison — Bus 1–14 (p.u.)</div>
+                            <span id="cmp-charts-hint" style="font-size:0.7rem;color:#334155;font-family:monospace;font-style:italic">Run a comparison to populate charts</span>
+                        </div>
+                        <canvas id="cmpVoltageChart" height="70"></canvas>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="glass-card p-3">
+                        <div class="chart-title">Reactive Power Loss Comparison (MVAR)</div>
+                        <canvas id="cmpQLossChart" height="150"></canvas>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="glass-card p-3">
+                        <div class="chart-title">P Loss per Line Comparison (MW)</div>
+                        <canvas id="cmpLossChart" height="150"></canvas>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="glass-card p-3">
+                        <div class="chart-title">Voltage Error |ML − NR| per Bus (p.u.)</div>
+                        <canvas id="cmpErrorChart" height="150"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tables — hidden until a converged comparison runs -->
+            <div id="cmp-tables-panel" class="d-none">
+                <!-- Per-bus voltage table -->
+                <div class="glass-card p-4 mb-4">
+                    <h6 class="chart-title mb-3">Per-Bus Voltage Comparison Table</h6>
+                    <div class="table-responsive">
+                        <table class="table table-dark compare-table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Bus</th>
+                                    <th style="color:#06b6d4"><i class="fas fa-brain me-1"></i>ML (p.u.)</th>
+                                    <th style="color:#f59e0b"><i class="fas fa-calculator me-1"></i>NR (p.u.)</th>
+                                    <th style="color:#f43f5e">|Error| (p.u.)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cmp-voltage-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Line Currents table -->
+                <div class="glass-card p-4">
+                    <h6 class="chart-title mb-3"><i class="fas fa-bolt me-2 text-warning"></i>Line Current Comparison (kA)</h6>
+                    <div class="table-responsive">
+                        <table class="table table-dark compare-table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Line</th>
+                                    <th style="color:#06b6d4"><i class="fas fa-brain me-1"></i>ML (kA)</th>
+                                    <th style="color:#f59e0b"><i class="fas fa-calculator me-1"></i>NR (kA)</th>
+                                    <th style="color:#f43f5e">|Error| (kA)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cmp-current-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div><!-- /cmp-tables-panel -->
+
+            <!-- NR Diverged panel (single compare) — shown instead when NR fails -->
+            <div id="nr-diverged-panel" class="d-none">
+                <div class="glass-card p-4 mb-4" style="border-left:4px solid #f59e0b">
+                    <div class="d-flex align-items-start gap-3 mb-4">
+                        <div class="flex-shrink-0" style="width:48px;height:48px;border-radius:12px;background:rgba(245,158,11,0.15);display:flex;align-items:center;justify-content:center">
+                            <i class="fas fa-exclamation-triangle text-warning fa-lg"></i>
+                        </div>
+                        <div>
+                            <h5 class="mb-1 text-warning" style="font-weight:800">Newton-Raphson Did Not Converge</h5>
+                            <p class="mb-0" style="color:#94a3b8;font-size:0.88rem">
+                                The traditional NR load flow solver failed for this operating condition.
+                                This is a known limitation of iterative solvers under extreme contingencies or ill-conditioned networks.
+                                The ML ensemble model has no such limitation — it always produces a result.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="p-3 rounded mb-4" style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2)">
+                        <div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:0.4rem">
+                            <i class="fas fa-info-circle me-1"></i>NR Solver Error
+                        </div>
+                        <code id="nr-diverged-error-msg" style="color:#fcd34d;font-size:0.82rem"></code>
+                    </div>
+                    <!-- ML-only result callout -->
+                    <div class="p-3 rounded" style="background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.2)">
+                        <div class="d-flex align-items-center gap-2 mb-3">
+                            <i class="fas fa-brain text-info"></i>
+                            <span class="fw-bold text-info">ML Ensemble Result</span>
+                            <span class="badge" style="background:rgba(34,197,94,0.2);color:#4ade80;border:1px solid rgba(34,197,94,0.3);font-size:0.7rem">CONVERGED</span>
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-3 col-6">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Total P Loss</div>
+                                <div class="fw-bold text-info" style="font-family:'JetBrains Mono',monospace;font-size:1.1rem" id="nd-ml-p-loss">—</div>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Topology</div>
+                                <div id="nd-topo-label" class="mt-1">—</div>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Voltage Violations</div>
+                                <div class="fw-bold mt-1" id="nd-violations">—</div>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">NR Status</div>
+                                <div class="fw-bold text-danger mt-1"><i class="fas fa-times-circle me-1"></i>Diverged</div>
+                            </div>
+                        </div>
+                        <!-- ML voltage table for diverged case -->
+                        <div class="table-responsive">
+                            <table class="table table-dark compare-table table-hover mb-0" style="font-size:0.78rem">
+                                <thead>
+                                    <tr>
+                                        <th>Bus</th>
+                                        <th style="color:#06b6d4">ML Voltage (p.u.)</th>
+                                        <th style="color:#06b6d4">ML Angle (°)</th>
+                                        <th style="color:#94a3b8">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="nd-voltage-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div><!-- /nr-diverged-panel -->
+
+        </div><!-- /compare tab -->
+
+    </div><!-- /tab-content -->
+</div><!-- /container -->
+
+<!-- ════════════════ CREDITS FOOTER ════════════════ -->
+<footer class="credits-footer">
+    <div class="container-fluid px-4">
+        <div class="row g-4">
+            <div class="col-md-4">
+                <div class="uni-name mb-1">
+                    <i class="fas fa-university me-2"></i>NED University of Engineering &amp; Technology
+                </div>
+                <div class="project-title mb-2">Electrical Engineering Department · Batch 2022</div>
+                <div class="project-title" style="color:#06b6d4;font-style:italic">
+                    "Data-Driven Load Flow Analysis for IEEE 14-Bus System using Ensemble ML"
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="mb-2" style="font-size:0.7rem;color:#475569;text-transform:uppercase;letter-spacing:0.5px">Project Team</div>
+                <div class="d-flex flex-column gap-1">
+                    <div><span class="student-name">Sohaib Uddin</span> <span class="roll-no ms-2">EE-22156</span></div>
+                    <div><span class="student-name">Muhammad Waleed</span> <span class="roll-no ms-2">EE-22154</span></div>
+                    <div><span class="student-name">Hammad Babar</span> <span class="roll-no ms-2">EE-22151</span></div>
+                    <div><span class="student-name">Mubashir Ali</span> <span class="roll-no ms-2">EE-22236</span></div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="mb-2" style="font-size:0.7rem;color:#475569;text-transform:uppercase;letter-spacing:0.5px">Supervision</div>
+                <div class="supervisor"><i class="fas fa-chalkboard-teacher me-1"></i>Engr. Shariq Shaikh</div>
+                <div class="supervisor mt-1"><i class="fas fa-user-tie me-1"></i>Prof. Dr. Shehnila Zardari <span style="font-size:0.65rem;color:#94a3b8">(Co-Supervisor)</span></div>
+                <div class="mt-3" style="font-size:0.7rem;color:#475569;text-transform:uppercase;letter-spacing:0.5px">Technology Stack</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:#64748b">
+                    FastAPI · XGBoost · LightGBM · CatBoost · pandapower · Chart.js · Bootstrap 5
+                </div>
+            </div>
+        </div>
+    </div>
+</footer>
+
+<div id="toast-container" aria-live="polite"></div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/script.js"></script>
+</body>
+</html>
