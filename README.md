@@ -268,7 +268,9 @@ git add .gitattributes
 
 ## License
 
-Add a license file before publishing as open source. MIT License is a common option for academic and educational projects.
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ---
 
