@@ -1,205 +1,133 @@
 # IEEE 14-Bus ML Load Flow Analyzer
 
-AI-powered web application for IEEE 14-bus load-flow prediction and contingency analysis. The system uses trained machine-learning models to estimate bus voltages, phase angles, active/reactive line losses, and line currents. It also includes a Newton-Raphson comparison mode using `pandapower`.
+## Table of Contents
+- [Complete Project Demo](#complete-project-demo)
+- [Project Overview](#project-overview)
+- [Key Features](#key-features)
+- [System Requirements](#system-requirements)
+- [Installation Guide](#installation-guide)
+- [Running the Project](#running-the-project)
+- [How the System Works](#how-the-system-works)
+  - [Manual Single-Scenario Prediction](#manual-single-scenario-prediction)
+  - [Batch Prediction from File](#batch-prediction-from-file)
+  - [Contingency Analysis](#contingency-analysis)
+  - [AI vs Newton-Raphson Comparison](#ai-vs-newton-raphson-comparison)
+- [API Endpoints](#api-endpoints)
+- [Input Format](#input-format)
+- [Resetting / Troubleshooting](#resetting--troubleshooting)
+- [Repository References](#repository-references)
+- [License](#license)
 
-Repository: https://github.com/Mubashir824/ml-based-loadflow-prediction
+## Complete Project Demo
+[Watch the system in action](PASTE_YOUR_DEMO_VIDEO_LINK_HERE)
 
----
+## Project Overview
+The IEEE 14-Bus ML Load Flow Analyzer is an AI-powered web application that
+estimates bus voltages, phase angles, active/reactive line losses, and line
+currents for the IEEE 14-bus test system using trained machine-learning
+models. It also includes a Newton-Raphson comparison mode powered by
+`pandapower`, so predictions can be validated against a conventional
+power-flow solver.
 
-## Features
-
+## Key Features
 - Manual single-scenario load-flow prediction
 - Batch time-series inference from CSV, XLSX, XLS, or Parquet files
 - Interactive dashboard for voltage profiles, phase angles, line losses, and line currents
-- Contingency analysis for:
-  - Base case
-  - Generator outages
-  - Line outages
-  - Load outages
-  - Shunt outage
+- Contingency analysis for base case, generator outages, line outages, load outages, and shunt outage
 - AI vs Newton-Raphson comparison using `pandapower`
 - Batch comparison for the first 10 rows of an uploaded dataset
 - CSV export of prediction results
 - Memory-friendly backend that loads one ML model at a time during inference
 
----
+## System Requirements
+Ensure the following are installed before running the project:
 
-## Tech Stack
-
-### Backend
-
-- Python
-- FastAPI
-- Uvicorn
-- Pandas / NumPy
-- Joblib
-- Scikit-learn
-- Pandapower
-- XGBoost / LightGBM / CatBoost, depending on the trained model files
-
-### Frontend
-
-- HTML
-- CSS
-- JavaScript
-- Bootstrap 5
-- Font Awesome
-- Chart.js
-- Chart.js Annotation Plugin
-- Google Fonts
-
----
-
-## Project Structure
-
-```text
-ml-based-loadflow-prediction/
-├── backend/
-│   ├── main.py
-│   ├── requirements.txt
-│   ├── models/
-│   │   ├── Voltage_Model.joblib
-│   │   ├── Angle_Model.joblib
-│   │   ├── SendingP_Model.joblib
-│   │   ├── ReceivingP_Model.joblib
-│   │   ├── Iline_Model.joblib
-│   │   ├── SendingQ_Model.joblib
-│   │   └── ReceivingQ_Model.joblib
-│   ├── scalers/
-│   │   ├── numerical_scaler.pkl
-│   │   ├── categorical_encoder.pkl
-│   │   ├── V2_V14_target_scaler.pkl
-│   │   ├── Angle_2_to_14_target_scaler.pkl
-│   │   ├── SendingPs_target_scaler.pkl
-│   │   ├── ReceivingPs_target_scaler.pkl
-│   │   ├── Line_Currents_target_scaler.pkl
-│   │   ├── SendingQs_target_scaler.pkl
-│   │   └── ReceivingQs_target_scaler.pkl
-│   └── static/
-│       └── images/
-│           ├── 0.png
-│           ├── 1.png
-│           └── ...
-└── frontend/
-    ├── index.html
-    ├── script.js
-    └── style.css
-```
-
----
-
-## Requirements
-
-- Python 3.10 or later recommended
-- Git
+- **Python 3.10 or later** – [Download Here](https://www.python.org/downloads/)
+- **Git** – [Download Here](https://git-scm.com/downloads)
 - A modern web browser
-- Trained model files inside `backend/models/`
-- Scaler/encoder files inside `backend/scalers/`
 
-Install dependencies from the backend requirements file:
+Trained model files (`backend/models/`) and scaler/encoder files
+(`backend/scalers/`) must already be present — the server will fail to start
+if any required file is missing.
 
-```bash
-pip install -r backend/requirements.txt
-```
+## Installation Guide
 
-If your saved models were trained using XGBoost, LightGBM, or CatBoost, make sure the same libraries are installed in your environment:
-
-```bash
-pip install xgboost lightgbm catboost
-```
-
----
-
-## Clone the Repository
-
-```bash
+#### 1. Clone the Repository
+```sh
 git clone https://github.com/Mubashir824/ml-based-loadflow-prediction.git
 cd ml-based-loadflow-prediction
 ```
 
----
-
-## Setup Instructions
-
-### 1. Create a virtual environment
-
-```bash
+#### 2. Create and Activate a Virtual Environment
+```sh
 python -m venv .venv
 ```
-
-### 2. Activate the virtual environment
-
 Windows:
-
-```bash
+```sh
 .venv\Scripts\activate
 ```
-
 macOS/Linux:
-
-```bash
+```sh
 source .venv/bin/activate
 ```
 
-### 3. Install dependencies
-
-```bash
-pip install -r backend/requirements.txt
+#### 3. Install Dependencies
+```sh
+pip install -r requirements.txt
 ```
 
-### 4. Check model and scaler folders
-
-Before running the app, confirm these folders exist:
-
+#### 4. Verify Model and Scaler Folders
+Before running the app, confirm these exist and are populated:
 ```text
 backend/models/
 backend/scalers/
 ```
 
-The backend expects the model and scaler filenames shown in the project structure. If any required file is missing, the server may fail during startup.
+## Running the Project
 
----
+Unlike multi-service setups, this project starts with a **single command**
+from the project root:
 
-## Run the Application Locally
-
-From the project root:
-
-```bash
-cd backend
-uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```sh
+python run.py
 ```
 
-Open the application in your browser:
+This launches the FastAPI backend, which also serves the frontend directly.
 
+### Access the Application
+Open the following URL in your browser:
 ```text
 http://127.0.0.1:8000
 ```
 
 Health check endpoint:
-
 ```text
 http://127.0.0.1:8000/health
 ```
 
----
+## How the System Works
 
-## Input Format
+### Manual Single-Scenario Prediction
+User enters 23 input features (11 active power values, 11 reactive power
+values, and a topology/contingency code). The backend loads each required ML
+model one at a time, runs inference, and returns predicted voltages, angles,
+line currents, and losses.
 
-The ML model expects 23 input features:
+### Batch Prediction from File
+User uploads a CSV/XLSX/XLS/Parquet file (up to 8,760 rows). Only the first
+23 columns of each row are used. Results can be exported back to CSV.
 
-```text
-P1, P2, ..., P11, Q1, Q2, ..., Q11, topology_category
-```
+### Contingency Analysis
+The `topology_category` code (0–31) tells the model which contingency is
+being simulated: base case, a specific generator outage, line outage, load
+outage, or shunt outage — so the same models can be reused across all
+scenarios.
 
-Where:
-
-- `P1` to `P11` are active power values in MW
-- `Q1` to `Q11` are reactive power values in MVAR
-- `topology_category` is an integer contingency code from `0` to `31`
-
-For batch prediction, upload a CSV, XLSX, XLS, or Parquet file with at least 23 columns. Only the first 23 columns are used.
-
----
+### AI vs Newton-Raphson Comparison
+For validation, the same scenario is solved twice: once by the ML models and
+once by a classical Newton-Raphson solver (`pandapower`, run in an isolated
+subprocess since it is not thread-safe). Batch comparison is capped at 10
+rows because the NR solver is computationally expensive.
 
 ## API Endpoints
 
@@ -212,68 +140,44 @@ For batch prediction, upload a CSV, XLSX, XLS, or Parquet file with at least 23 
 | `POST` | `/compare` | Compares ML inference with Newton-Raphson for one scenario |
 | `POST` | `/compare_batch` | Compares ML and Newton-Raphson for up to 10 uploaded rows |
 
-Example single prediction request:
+## Input Format
+The ML model expects 23 input features:
+```text
+P1, P2, ..., P11, Q1, Q2, ..., Q11, topology_category
+```
+- `P1`–`P11`: active power values in MW
+- `Q1`–`Q11`: reactive power values in MVAR
+- `topology_category`: contingency code from `0` to `31`
 
-```bash
+Example single prediction request:
+```sh
 curl -X POST http://127.0.0.1:8000/predict_single \
   -H "Content-Type: application/json" \
   -d '{"features":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}'
 ```
 
----
+## Resetting / Troubleshooting
+If the server fails to start:
+1. Confirm `backend/models/` and `backend/scalers/` contain all required
+   `.joblib` / `.pkl` files listed in the project structure.
+2. Confirm the virtual environment is activated and
+   `pip install -r requirements.txt` completed without errors.
+3. Delete `backend/__pycache__/` and restart with `python run.py`.
 
-## Deployment
+## Repository References
+This project uses [`pandapower`](https://www.pandapower.org/) for the
+Newton-Raphson comparison mode, applied to the standard IEEE 14-bus test
+system.
 
-For deployment, run without reload mode:
-
-```bash
-cd backend
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-For production, it is recommended to run Uvicorn behind a reverse proxy such as Nginx and use a process manager such as systemd, Supervisor, Docker, or a cloud platform service manager.
-
----
-
-## Important Notes
-
-- The frontend uses CDN-hosted libraries, so internet access is required unless the assets are downloaded and served locally.
-- The Newton-Raphson comparison uses `pandapower` and may be slower than ML inference.
-- Batch comparison is limited to 10 rows because Newton-Raphson solving is computationally expensive.
-- Batch prediction is limited to 8,760 rows.
-- The ML models are loaded one at a time to reduce memory usage.
-
----
-
-## Suggested `.gitignore`
-
-```gitignore
-.venv/
-__pycache__/
-*.pyc
-.env
-.DS_Store
-.ipynb_checkpoints/
-```
-
-If your model files are large, consider using Git LFS:
-
-```bash
-git lfs install
-git lfs track "*.joblib" "*.pkl"
-git add .gitattributes
-```
-
----
+For any questions or issues, feel free to contact us or raise an issue in
+the repository.
 
 ## License
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
----
+This project is licensed under the MIT License. See the [LICENSE](LICENSE)
+file for details.
 
 ## Acknowledgements
-
-This project is designed for IEEE 14-bus load-flow analysis and demonstrates how machine-learning models can approximate conventional power-flow calculations while providing fast visualization and contingency analysis through a web dashboard.
+This project is designed for IEEE 14-bus load-flow analysis and demonstrates
+how machine-learning models can approximate conventional power-flow
+calculations while providing fast visualization and contingency analysis
+through a web dashboard.
