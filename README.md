@@ -105,6 +105,12 @@ Health check endpoint:
 http://127.0.0.1:8000/health
 ```
 
+> **Note:** The terminal will print `Uvicorn running on http://0.0.0.0:8000`.
+> Do **not** paste `0.0.0.0:8000` into your browser — `0.0.0.0` just tells
+> the server to accept connections from any network interface, it is not a
+> real browsable address. Always use `http://127.0.0.1:8000` or
+> `http://localhost:8000` in the browser.
+
 ## How the System Works
 
 ### Manual Single-Scenario Prediction
