@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -8,7 +8,7 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=3">
 </head>
 <body>
 
@@ -167,7 +167,61 @@
                             <div class="stat-label mt-1" id="bs-best-val" style="color:#22c55e">—</div>
                         </div>
                     </div>
+                    <!-- NR verification counts -->
+                    <div class="col-6 col-md-2">
+                        <div class="stat-card">
+                            <div class="stat-value text-success" id="bs-nr-verified">—</div>
+                            <div class="stat-label">NR Converged Hours</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-2">
+                        <div class="stat-card">
+                            <div class="stat-value" id="bs-nr-failed">—</div>
+                            <div class="stat-label">NR Not Converged</div>
+                        </div>
+                    </div>
                 </div>
+                <div id="bs-scope-note" class="mt-2 d-none" style="font-size:0.7rem;color:#64748b"></div>
+            </div>
+
+            <!-- NR verification -->
+            <div id="nr-verify-card" class="glass-card p-3 mb-4 d-none" style="border-left:3px solid var(--warning)">
+                <h6 class="mb-1 text-warning"><i class="fas fa-calculator me-2"></i>Newton-Raphson Verification</h6>
+                <p class="mb-3" style="font-size:0.78rem;color:#94a3b8">
+                    Results above are ML predictions. Run the Newton-Raphson load flow on them to confirm that a
+                    valid operating point exists: where NR converges, the ML prediction is kept and marked verified;
+                    where NR does not converge, the hour is flagged as <strong class="text-danger">potentially insecure</strong>
+                    and its ML prediction is withheld as unreliable.
+                </p>
+                <div id="nrv-setup" class="d-flex align-items-center flex-wrap gap-3">
+                    <div id="nrv-scope-options" class="d-flex align-items-center flex-wrap gap-3">
+                        <div class="form-check mb-0">
+                            <input class="form-check-input" type="radio" name="nrv-scope" id="nrv-scope-all" value="all" checked>
+                            <label class="form-check-label small" for="nrv-scope-all">All <span id="nrv-total-hours">0</span> hours</label>
+                        </div>
+                        <div class="form-check mb-0 d-flex align-items-center gap-2">
+                            <input class="form-check-input" type="radio" name="nrv-scope" id="nrv-scope-sample" value="sample">
+                            <label class="form-check-label small" for="nrv-scope-sample">Random sample of</label>
+                            <input type="number" id="nrv-sample-size" class="form-control form-control-sm text-center"
+                                   style="width:90px" min="1" value="100"
+                                   onfocus="document.getElementById('nrv-scope-sample').checked = true">
+                            <span class="small">hours</span>
+                        </div>
+                    </div>
+                    <button id="nrv-start-btn" class="btn btn-sm btn-warning px-3" onclick="startNRVerification()">
+                        <i class="fas fa-play me-1"></i>Run NR Verification
+                    </button>
+                </div>
+                <div id="nrv-progress" class="d-none">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span id="nrv-progress-text" class="small" style="font-family:'JetBrains Mono',monospace">Starting solver…</span>
+                        <button id="nrv-cancel-btn" class="btn btn-sm btn-outline-danger px-2 py-0" onclick="cancelNRVerification()">
+                            <i class="fas fa-stop me-1"></i>Cancel
+                        </button>
+                    </div>
+                    <div class="progress"><div class="progress-bar nrv-bar" id="nrv-progress-bar" style="width:0%"></div></div>
+                </div>
+                <div id="nrv-summary" class="d-none mt-3"></div>
             </div>
 
             <!-- Single export -->
@@ -213,6 +267,9 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Result source of the displayed hour (ML / NR verified / NR not converged) -->
+            <div id="hour-status-banner" class="mb-3 d-none"></div>
 
             <!-- Dashboard grid -->
             <div class="row g-4">
@@ -607,66 +664,33 @@
                 </div>
             </div><!-- /cmp-tables-panel -->
 
-            <!-- NR Diverged panel (single compare) — shown instead when NR fails -->
+            <!-- NR not converged panel (single compare) — shown instead when NR fails -->
             <div id="nr-diverged-panel" class="d-none">
-                <div class="glass-card p-4 mb-4" style="border-left:4px solid #f59e0b">
+                <div class="glass-card p-4 mb-4" style="border-left:4px solid var(--danger)">
                     <div class="d-flex align-items-start gap-3 mb-4">
-                        <div class="flex-shrink-0" style="width:48px;height:48px;border-radius:12px;background:rgba(245,158,11,0.15);display:flex;align-items:center;justify-content:center">
-                            <i class="fas fa-exclamation-triangle text-warning fa-lg"></i>
+                        <div class="flex-shrink-0" style="width:48px;height:48px;border-radius:12px;background:rgba(244,63,94,0.15);display:flex;align-items:center;justify-content:center">
+                            <i class="fas fa-exclamation-triangle text-danger fa-lg"></i>
                         </div>
                         <div>
-                            <h5 class="mb-1 text-warning" style="font-weight:800">Newton-Raphson Did Not Converge</h5>
+                            <h5 class="mb-1 text-danger" style="font-weight:800">Newton-Raphson Did Not Converge — Potentially Insecure Operating Point</h5>
                             <p class="mb-0" style="color:#94a3b8;font-size:0.88rem">
-                                The traditional NR load flow solver failed for this operating condition.
-                                This is a known limitation of iterative solvers under extreme contingencies or ill-conditioned networks.
-                                The ML ensemble model has no such limitation — it always produces a result.
+                                No load flow solution was found for this scenario. Non-convergence can indicate voltage
+                                collapse or insufficient reactive power support, so a valid steady-state operating point
+                                may not exist. The ML prediction is withheld, because presenting it would imply an
+                                operating point that may not be physically achievable. This scenario needs further investigation.
                             </p>
                         </div>
                     </div>
-                    <div class="p-3 rounded mb-4" style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2)">
-                        <div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:0.4rem">
-                            <i class="fas fa-info-circle me-1"></i>NR Solver Error
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Topology</div>
+                            <div id="nd-topo-label" class="mt-1">—</div>
                         </div>
-                        <code id="nr-diverged-error-msg" style="color:#fcd34d;font-size:0.82rem"></code>
-                    </div>
-                    <!-- ML-only result callout -->
-                    <div class="p-3 rounded" style="background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.2)">
-                        <div class="d-flex align-items-center gap-2 mb-3">
-                            <i class="fas fa-brain text-info"></i>
-                            <span class="fw-bold text-info">ML Ensemble Result</span>
-                            <span class="badge" style="background:rgba(34,197,94,0.2);color:#4ade80;border:1px solid rgba(34,197,94,0.3);font-size:0.7rem">CONVERGED</span>
-                        </div>
-                        <div class="row g-3 mb-3">
-                            <div class="col-md-3 col-6">
-                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Total P Loss</div>
-                                <div class="fw-bold text-info" style="font-family:'JetBrains Mono',monospace;font-size:1.1rem" id="nd-ml-p-loss">—</div>
+                        <div class="col-md-8">
+                            <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:0.4rem">
+                                <i class="fas fa-info-circle me-1"></i>NR Solver Message
                             </div>
-                            <div class="col-md-3 col-6">
-                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Topology</div>
-                                <div id="nd-topo-label" class="mt-1">—</div>
-                            </div>
-                            <div class="col-md-3 col-6">
-                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Voltage Violations</div>
-                                <div class="fw-bold mt-1" id="nd-violations">—</div>
-                            </div>
-                            <div class="col-md-3 col-6">
-                                <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">NR Status</div>
-                                <div class="fw-bold text-danger mt-1"><i class="fas fa-times-circle me-1"></i>Diverged</div>
-                            </div>
-                        </div>
-                        <!-- ML voltage table for diverged case -->
-                        <div class="table-responsive">
-                            <table class="table table-dark compare-table table-hover mb-0" style="font-size:0.78rem">
-                                <thead>
-                                    <tr>
-                                        <th>Bus</th>
-                                        <th style="color:#06b6d4">ML Voltage (p.u.)</th>
-                                        <th style="color:#06b6d4">ML Angle (°)</th>
-                                        <th style="color:#94a3b8">Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="nd-voltage-table-body"></tbody>
-                            </table>
+                            <code id="nr-diverged-error-msg" style="color:#fda4af;font-size:0.82rem"></code>
                         </div>
                     </div>
                 </div>
@@ -714,6 +738,6 @@
 
 <div id="toast-container" aria-live="polite"></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/script.js"></script>
+<script src="/static/script.js?v=3"></script>
 </body>
 </html>

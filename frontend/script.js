@@ -80,6 +80,14 @@ let loadingInterval  = null;
 let autoPlayInterval = null;
 let autoPlaySpeed    = 800;
 
+// NR verification of the current results. Each result row carries a `source`:
+//   'ML'           — ML prediction, not verified
+//   'NR_CONVERGED' — ML prediction kept; NR confirmed a valid operating point exists
+//   'NR_FAILED'    — NR did not converge; potentially insecure, values withheld
+let nrJob         = null;   // { id, cursor, timer, total }
+let nrLastSummary = null;   // { checked, converged, failed, status }
+const NR_POLL_MS  = 800;
+
 // =============================================================
 //  CHART.JS GLOBAL DEFAULTS
 // =============================================================
@@ -857,13 +865,13 @@ async function runComparison() {
             document.getElementById('cmp-tables-panel').classList.remove('d-none');
             showToast('✅ Comparison complete', 'success', 3000);
         } else {
-            // NR diverged — show ML-only panel, hide tables (no NR data to compare)
+            // NR did not converge — potentially insecure; no ML numbers shown
             if (!cmpChartsInitialised) { initCompareCharts(); cmpChartsInitialised = true; }
             renderNRDivergedPanel(data);
-            renderCompareChartsMLOnly(data.ml);
+            clearCompareCharts();
             document.getElementById('nr-diverged-panel').classList.remove('d-none');
             document.getElementById('cmp-tables-panel').classList.add('d-none');
-            showToast('⚠️ NR solver diverged — ML result shown only', 'warning', 5000);
+            showToast('⚠️ NR did not converge — potentially insecure operating point', 'warning', 6000);
         }
         // Scroll to charts (always visible)
         document.getElementById('cmp-charts-row').scrollIntoView({behavior:'smooth', block:'start'});
@@ -979,85 +987,36 @@ function renderCompareResults(data) {
 }
 
 // =============================================================
-//  COMPARE CHARTS — ML-only fallback (NR diverged)
+//  COMPARE CHARTS — cleared when NR did not converge
 // =============================================================
-function renderCompareChartsMLOnly(ml) {
+function clearCompareCharts() {
     if (!cmpChartsInitialised) { initCompareCharts(); cmpChartsInitialised = true; }
-    const mlV = [1.06, ...ml.V2_V14];
-    const zeros14 = new Array(14).fill(null);
-    const zeros15 = new Array(15).fill(null);
-
-    if (cmpVoltageChart) {
-        cmpVoltageChart.data.datasets[0].data = mlV;
-        cmpVoltageChart.data.datasets[1].data = zeros14;
-        cmpVoltageChart.resize();
-        cmpVoltageChart.update();
-    }
-    if (cmpQLossChart) {
-        cmpQLossChart.data.datasets[0].data = (ml.Q_loss || []).slice(0, 15);
-        cmpQLossChart.data.datasets[1].data = zeros15;
-        cmpQLossChart.resize();
-        cmpQLossChart.update();
-    }
-    if (cmpLossChart) {
-        cmpLossChart.data.datasets[0].data = ml.P_loss.slice(0, 15);
-        cmpLossChart.data.datasets[1].data = zeros15;
-        cmpLossChart.resize();
-        cmpLossChart.update();
-    }
-    if (cmpErrorChart) {
-        cmpErrorChart.data.datasets[0].data = zeros14;
-        cmpErrorChart.resize();
-        cmpErrorChart.update();
-    }
+    [cmpVoltageChart, cmpQLossChart, cmpLossChart, cmpErrorChart].forEach(c => {
+        if (!c) return;
+        c.data.datasets.forEach(ds => { ds.data = []; });
+        c.resize();
+        c.update();
+    });
 }
 
 // =============================================================
-//  NR DIVERGED — ML-ONLY PANEL
+//  NR NOT CONVERGED — POTENTIALLY INSECURE PANEL
 // =============================================================
 function renderNRDivergedPanel(data) {
-    const {ml, nr_error, topology} = data;
-
+    const {nr_error, topology} = data;
     document.getElementById('nr-diverged-error-msg').textContent = nr_error || 'Unknown solver error';
-    document.getElementById('nd-ml-p-loss').textContent = ml.Total_P_Loss.toFixed(4) + ' MW';
     document.getElementById('nd-topo-label').innerHTML = getTypeBadgeHTML(topology) +
         `<span class="text-info ms-1">${topoLabel[topology] || `Cat. ${topology}`}</span>`;
-
-    const viol = ml.voltage_violations || [];
-    const violEl = document.getElementById('nd-violations');
-    if (viol.length === 0) {
-        violEl.innerHTML = '<span class="text-success"><i class="fas fa-check-circle me-1"></i>None</span>';
-    } else {
-        violEl.innerHTML = `<span class="text-danger"><i class="fas fa-exclamation-triangle me-1"></i>${viol.length} bus(es)</span>`;
-    }
-
-    // Per-bus voltage + angle table
-    const mlV = [1.06, ...ml.V2_V14];
-    const mlA = [0.0,  ...ml.Angle_2_14];
-    const tbody = document.getElementById('nd-voltage-table-body');
-    tbody.innerHTML = '';
-    for (let i = 0; i < 14; i++) {
-        const v = mlV[i], a = mlA[i];
-        const viol_flag = (v < 0.95 || v > 1.05);
-        const vCls = viol_flag ? 'text-danger' : 'text-success';
-        const status = i === 0 ? '<span class="badge badge-type-base" style="font-size:0.6rem">Slack</span>'
-                     : viol_flag ? '<span class="badge badge-violation-low" style="font-size:0.6rem">⚠ Violation</span>'
-                                 : '<span style="color:#22c55e;font-size:0.75rem">✓ OK</span>';
-        tbody.innerHTML += `<tr>
-            <td class="text-muted" style="font-family:monospace">Bus ${i+1}</td>
-            <td class="${vCls}" style="font-family:monospace">${v.toFixed(5)}</td>
-            <td style="font-family:monospace;color:#8b5cf6">${a.toFixed(4)}°</td>
-            <td>${status}</td>
-        </tr>`;
-    }
 }
 
 // =============================================================
 //  RESULTS PROCESSING
 // =============================================================
 function processResults(data) {
+    abandonNRVerification();
     globalResults = data.data;
     const total   = data.total_hours;
+    resetNRVerificationCard(total);
 
     // Ensure dashboard charts are initialised before we push data into them
     if (!chartsInitialised) { initDashboardCharts(); chartsInitialised = true; }
@@ -1090,10 +1049,41 @@ function processResults(data) {
 // =============================================================
 function renderBatchSummary(results) {
     document.getElementById('batch-summary').classList.remove('d-none');
-    const allP  = results.map(r => r.Total_P_Loss);
-    const viol  = results.filter(r => r.has_violations).length;
-    const worst = results.reduce((a, b) => a.Total_P_Loss > b.Total_P_Loss ? a : b);
-    const best  = results.reduce((a, b) => a.Total_P_Loss < b.Total_P_Loss ? a : b);
+
+    // Hours where NR did not converge have no valid operating point, so they
+    // are excluded from the loss / violation statistics.
+    const valid    = results.filter(r => r.source !== 'NR_FAILED');
+    const verified = results.filter(r => r.source === 'NR_CONVERGED').length;
+    const failed   = results.length - valid.length;
+
+    const nrVerEl  = document.getElementById('bs-nr-verified');
+    const nrFailEl = document.getElementById('bs-nr-failed');
+    const nrRan    = nrLastSummary !== null;
+    nrVerEl.textContent  = nrRan ? verified : '—';
+    nrFailEl.textContent = nrRan ? failed   : '—';
+    nrFailEl.className   = 'stat-value ' + (!nrRan ? '' : failed > 0 ? 'text-danger' : 'text-success');
+
+    const note = document.getElementById('bs-scope-note');
+    if (failed > 0) {
+        note.innerHTML = `<i class="fas fa-info-circle me-1"></i>Loss and violation statistics exclude the ${failed} hour(s) where Newton-Raphson did not converge.`;
+        note.classList.remove('d-none');
+    } else {
+        note.classList.add('d-none');
+    }
+
+    const worstCard = document.getElementById('stat-worst-card');
+    const bestCard  = document.getElementById('stat-best-card');
+    if (!valid.length) {
+        ['bs-avg-p','bs-violations','bs-worst-hour','bs-worst-val','bs-best-hour','bs-best-val']
+            .forEach(id => document.getElementById(id).textContent = '—');
+        worstCard.onclick = bestCard.onclick = null;
+        return;
+    }
+
+    const allP  = valid.map(r => r.Total_P_Loss);
+    const viol  = valid.filter(r => r.has_violations).length;
+    const worst = valid.reduce((a, b) => a.Total_P_Loss > b.Total_P_Loss ? a : b);
+    const best  = valid.reduce((a, b) => a.Total_P_Loss < b.Total_P_Loss ? a : b);
     const avgP  = allP.reduce((a, b) => a + b, 0) / allP.length;
 
     document.getElementById('bs-avg-p').textContent = avgP.toFixed(3);
@@ -1107,8 +1097,6 @@ function renderBatchSummary(results) {
     document.getElementById('bs-best-hour').textContent  = `Hour ${best.hour}`;
     document.getElementById('bs-best-val').textContent   = best.Total_P_Loss.toFixed(3) + ' MW';
 
-    const worstCard = document.getElementById('stat-worst-card');
-    const bestCard  = document.getElementById('stat-best-card');
     if (worstCard) { worstCard.style.cursor='pointer'; worstCard.title=`Jump to Hour ${worst.hour}`; worstCard.onclick=()=>jumpToHour(worst.hour); }
     if (bestCard)  { bestCard.style.cursor='pointer';  bestCard.title=`Jump to Hour ${best.hour}`;  bestCard.onclick=()=>jumpToHour(best.hour); }
 }
@@ -1156,6 +1144,9 @@ function updateDashboardForHour(hour) {
         getTypeBadgeHTML(d.topology_category) +
         `<span class="text-info">${topoLabel[d.topology_category] || `Cat. ${d.topology_category}`}</span>`;
 
+    renderHourStatus(d);
+    if (d.source === 'NR_FAILED') { renderInsecureHour(); return; }
+
     document.getElementById('sum-p-loss').textContent = d.Total_P_Loss.toFixed(4);
     const qEl = document.getElementById('sum-q-loss');
     if (qEl) qEl.textContent = (d.Total_Q_Loss ?? 0).toFixed(4);
@@ -1198,6 +1189,236 @@ function updateDashboardForHour(hour) {
             Highest current: <strong class="text-info">${LINE_LABELS[maxCurr]}</strong>
             <span class="ms-2" style="font-family:monospace;color:#94a3b8">${currents[maxCurr].toFixed(4)} kA</span>`;
     }
+}
+
+// Banner above the dashboard grid stating where the displayed numbers come from.
+function renderHourStatus(d) {
+    const el = document.getElementById('hour-status-banner');
+    if (!el) return;
+    el.classList.remove('d-none');
+    if (d.source === 'NR_FAILED') {
+        el.innerHTML = `<div class="hour-status hour-status-insecure">
+            <i class="fas fa-exclamation-triangle fa-lg text-danger"></i>
+            <div>
+                <strong>Hour ${d.hour}: Newton-Raphson did not converge — potentially insecure operating point.</strong>
+                <div class="mt-1">No load flow solution was found for this scenario. This can indicate voltage collapse
+                or insufficient reactive power support, so a valid operating point may not exist. The ML prediction is
+                withheld and this hour needs further investigation.</div>
+                <div class="mt-1" style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:#fda4af">${escapeHTML(d.nr_error || '')}</div>
+            </div></div>`;
+    } else if (d.source === 'NR_CONVERGED') {
+        const it = d.nr_iterations > 0 ? ` in ${d.nr_iterations} iterations` : '';
+        el.innerHTML = `<div class="hour-status hour-status-nr">
+            <i class="fas fa-check-circle text-success"></i>
+            <div><strong>ML prediction — verified:</strong> Newton-Raphson converged for hour ${d.hour}${it},
+            confirming a valid operating point exists.</div></div>`;
+    } else {
+        el.innerHTML = `<div class="hour-status hour-status-ml">
+            <i class="fas fa-brain text-info"></i>
+            <div><strong class="text-info">ML prediction</strong> — not verified with Newton-Raphson.
+            Use NR Verification to confirm a valid operating point exists.</div></div>`;
+    }
+}
+
+// Clear every value panel for an hour with no valid operating point.
+function renderInsecureHour() {
+    document.getElementById('sum-p-loss').textContent = '—';
+    const qEl = document.getElementById('sum-q-loss');
+    if (qEl) qEl.textContent = '—';
+    document.getElementById('violation-box').innerHTML =
+        `<span class="text-danger"><i class="fas fa-ban me-1"></i>No valid operating point (NR did not converge)</span>`;
+    document.getElementById('most-loaded-line').textContent = '—';
+    document.getElementById('most-loaded-current').textContent = '—';
+    [voltageChart, angleChart, lossChart, currentChart].forEach(c => {
+        if (c) { c.data.datasets[0].data = []; c.update('active'); }
+    });
+}
+
+function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// =============================================================
+//  NR VERIFICATION  (solve the predicted hours with Newton-Raphson)
+// =============================================================
+function resetNRVerificationCard(total) {
+    nrLastSummary = null;
+    document.getElementById('nr-verify-card').classList.remove('d-none');
+    document.getElementById('nrv-total-hours').textContent = total;
+    document.getElementById('nrv-scope-options').classList.toggle('d-none', total <= 1);
+    document.getElementById('nrv-scope-all').checked = true;
+    const sample = document.getElementById('nrv-sample-size');
+    sample.max   = total;
+    sample.value = Math.min(total, Math.max(1, Math.round(total * 0.1)));
+    document.getElementById('nrv-start-btn').innerHTML = total > 1
+        ? '<i class="fas fa-play me-1"></i>Run NR Verification'
+        : '<i class="fas fa-play me-1"></i>Verify this scenario with NR';
+    showNRStage('setup');
+}
+
+function showNRStage(stage) {
+    document.getElementById('nrv-setup').classList.toggle('d-none', stage !== 'setup');
+    document.getElementById('nrv-progress').classList.toggle('d-none', stage !== 'progress');
+    document.getElementById('nrv-summary').classList.toggle('d-none', stage !== 'summary');
+}
+
+// Hours to verify: all, or a uniform random sample without replacement.
+function pickNRHours() {
+    const n = globalResults.length;
+    const hours = globalResults.map(r => r.hour);
+    if (n <= 1 || document.getElementById('nrv-scope-all').checked) return hours;
+    const k = parseInt(document.getElementById('nrv-sample-size').value);
+    if (isNaN(k) || k < 1 || k > n) {
+        showToast(`Enter a sample size between 1 and ${n}.`, 'warning');
+        return null;
+    }
+    for (let i = 0; i < k; i++) {           // partial Fisher–Yates shuffle
+        const j = i + Math.floor(Math.random() * (n - i));
+        [hours[i], hours[j]] = [hours[j], hours[i]];
+    }
+    return hours.slice(0, k).sort((a, b) => a - b);
+}
+
+async function startNRVerification() {
+    if (!globalResults.length || nrJob) return;
+    const hours = pickNRHours();
+    if (!hours) return;
+    const rows = hours.map(h => ({hour: h, features: globalResults[h - 1].inputs}));
+
+    showNRStage('progress');
+    document.getElementById('nrv-progress-bar').style.width = '0%';
+    document.getElementById('nrv-progress-text').textContent = `Starting Newton-Raphson solver for ${rows.length} hour(s)…`;
+    try {
+        const res = await fetch('/nr_verify/start', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({rows})
+        });
+        if (!res.ok) { const e = await res.json(); throw new Error(e.detail?.[0]?.msg || e.detail || 'Server error'); }
+        const data = await res.json();
+        nrJob = {id: data.job_id, cursor: 0, total: data.total, timer: null};
+        nrJob.timer = setTimeout(pollNRVerification, NR_POLL_MS);
+    } catch (e) {
+        showNRStage('setup');
+        showToast('❌ Could not start NR verification: ' + e.message, 'danger');
+    }
+}
+
+async function pollNRVerification() {
+    if (!nrJob) return;
+    const job = nrJob;
+    let s;
+    try {
+        const res = await fetch(`/nr_verify/${job.id}?cursor=${job.cursor}`);
+        if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Server error'); }
+        s = await res.json();
+    } catch (e) {
+        if (nrJob !== job) return;
+        nrJob = null;
+        showNRStage('setup');
+        showToast('❌ NR verification failed: ' + e.message, 'danger');
+        return;
+    }
+    if (nrJob !== job) return;              // superseded by a newer prediction
+
+    job.cursor = s.cursor;
+    applyNRResults(s.results);
+
+    const pct = s.total ? (s.done / s.total) * 100 : 0;
+    document.getElementById('nrv-progress-bar').style.width = pct.toFixed(1) + '%';
+    const eta = s.done > 0 && s.done < s.total
+        ? ` · ~${Math.ceil(s.elapsed_s / s.done * (s.total - s.done))}s left` : '';
+    document.getElementById('nrv-progress-text').innerHTML =
+        `Solved ${s.done.toLocaleString()} / ${s.total.toLocaleString()} · ` +
+        `<span class="text-success">${s.converged.toLocaleString()} converged</span> · ` +
+        `<span class="${s.not_converged ? 'text-danger' : ''}">${s.not_converged.toLocaleString()} not converged</span>` +
+        ` · ${s.elapsed_s}s${eta}`;
+
+    if (s.status === 'running') {
+        job.timer = setTimeout(pollNRVerification, NR_POLL_MS);
+        return;
+    }
+    nrJob = null;
+    if (s.status === 'error') {
+        showNRStage('setup');
+        showToast('❌ NR verification failed: ' + (s.error || 'unknown error'), 'danger');
+        return;
+    }
+    finishNRVerification(s);
+}
+
+// Keep ML values where NR converged; withhold them where NR failed.
+function applyNRResults(results) {
+    if (!results.length) return;
+    const VALUE_FIELDS = ['V2_V14','Angle_2_14','P_send','P_rec','P_loss','Total_P_Loss',
+                          'Q_send','Q_rec','Q_loss','Total_Q_Loss','Line_Currents',
+                          'Line_Loading_Pct','voltage_violations','has_violations'];
+    for (const res of results) {
+        const r = globalResults[res.hour - 1];
+        if (!r || r.source === 'NR_FAILED') continue;   // values already withheld
+        if (res.converged) {
+            r.source = 'NR_CONVERGED';
+            r.nr_iterations = res.iterations;
+        } else {
+            VALUE_FIELDS.forEach(k => { delete r[k]; });
+            r.source = 'NR_FAILED';
+            r.nr_error = res.error;
+        }
+    }
+    const current = parseInt(document.getElementById('hour-slider').value) || 1;
+    if (results.some(res => res.hour === current)) updateDashboardForHour(current);
+}
+
+function finishNRVerification(s) {
+    nrLastSummary = {checked: s.done, converged: s.converged, failed: s.not_converged, status: s.status};
+    if (globalResults.length > 1) renderBatchSummary(globalResults);
+    updateDashboardForHour(parseInt(document.getElementById('hour-slider').value) || 1);
+
+    const total     = globalResults.length;
+    const unchecked = total - s.done;
+    const failedHrs = globalResults.filter(r => r.source === 'NR_FAILED').map(r => r.hour);
+    const CHIP_LIMIT = 200;
+    const chips = failedHrs.slice(0, CHIP_LIMIT)
+        .map(h => `<span class="nrv-hour-chip" onclick="jumpToHour(${h})" title="Show hour ${h}">${h}</span>`).join('') +
+        (failedHrs.length > CHIP_LIMIT ? `<span class="small text-muted">+${failedHrs.length - CHIP_LIMIT} more (see CSV export)</span>` : '');
+
+    const headline = s.not_converged === 0
+        ? `<div class="text-success fw-bold mb-1"><i class="fas fa-check-circle me-1"></i>All ${s.done.toLocaleString()} checked hour(s) converged.
+             A valid operating point exists for each, so their ML predictions are confirmed.</div>`
+        : `<div class="text-danger fw-bold mb-1"><i class="fas fa-exclamation-triangle me-1"></i>Newton-Raphson did not converge for
+             ${s.not_converged.toLocaleString()} of ${s.done.toLocaleString()} checked hour(s) — potentially insecure operating points.</div>
+           <div class="small mb-2" style="color:#94a3b8">${s.converged.toLocaleString()} hour(s) converged; their ML predictions are confirmed.
+             The ML predictions for non-converged hours are flagged unreliable and withheld; click an hour to inspect it:</div>
+           <div>${chips}</div>`;
+    const cancelled = s.status === 'cancelled'
+        ? `<div class="small text-warning mt-2"><i class="fas fa-stop-circle me-1"></i>Verification was cancelled after ${s.done.toLocaleString()} of ${s.total.toLocaleString()} selected hour(s).</div>` : '';
+    const scope = unchecked > 0
+        ? `<div class="small mt-2" style="color:#94a3b8"><i class="fas fa-info-circle me-1"></i>${unchecked.toLocaleString()} of ${total.toLocaleString()} hour(s)
+             were not checked and remain unverified ML predictions; their feasibility has not been confirmed.</div>` : '';
+
+    const summary = document.getElementById('nrv-summary');
+    summary.innerHTML = headline + cancelled + scope +
+        `<button class="btn btn-sm btn-outline-warning mt-3" onclick="showNRStage('setup')">
+            <i class="fas fa-redo me-1"></i>Verify again</button>`;
+    showNRStage('summary');
+
+    if (s.not_converged > 0) showToast(`⚠️ NR did not converge for ${s.not_converged} hour(s) — flagged as potentially insecure.`, 'warning', 7000);
+    else if (s.status === 'done') showToast(`✅ NR verification complete — all ${s.done} hour(s) converged.`, 'success', 5000);
+}
+
+async function cancelNRVerification() {
+    if (!nrJob) return;
+    document.getElementById('nrv-cancel-btn').disabled = true;
+    try { await fetch(`/nr_verify/${nrJob.id}/cancel`, {method: 'POST'}); }
+    catch (e) { console.error(e); }
+    finally { document.getElementById('nrv-cancel-btn').disabled = false; }
+}
+
+// A new prediction replaces the results being verified: stop the old job.
+function abandonNRVerification() {
+    if (!nrJob) return;
+    clearTimeout(nrJob.timer);
+    fetch(`/nr_verify/${nrJob.id}/cancel`, {method: 'POST'}).catch(() => {});
+    nrJob = null;
 }
 
 // =============================================================
@@ -1249,20 +1470,27 @@ function toggleAutoPlay() {
 function exportResults() {
     if (!globalResults.length) return;
     const header = [
-        'Hour','Topology_Code','Topology_Label','Contingency_Type',
+        'Hour','Topology_Code','Topology_Label','Contingency_Type','Result_Source',
         'Total_P_Loss_MW','Has_Violations','Violation_Details',
         'V1_pu', ...Array.from({length:13}, (_,i) => `V${i+2}_pu`),
         'Angle1_deg', ...Array.from({length:13}, (_,i) => `Angle${i+2}_deg`),
         ...LINE_LABELS.map(l => `PLoss_${l.replace(/[\s()]/g,'_')}_MW`),
         ...LINE_LABELS.map(l => `ICurrent_${l.replace(/[\s()]/g,'_')}_kA`),
     ];
+    const SOURCE_LABEL = {ML: 'ML_prediction_unverified', NR_CONVERGED: 'ML_prediction_NR_converged',
+                          NR_FAILED: 'NR_not_converged_potentially_insecure'};
     const rows = [header];
     globalResults.forEach(r => {
+        const label = [r.hour, r.topology_category,
+            `"${topoLabel[r.topology_category]||r.topology_category}"`,
+            topoType[r.topology_category]||'unknown', SOURCE_LABEL[r.source] || r.source];
+        if (r.source === 'NR_FAILED') {      // no operating point: values left blank
+            rows.push([...label, ...new Array(header.length - label.length).fill('')]);
+            return;
+        }
         const viols = (r.voltage_violations||[]).map(v=>`${v.bus}=${v.value}`).join(';') || 'None';
         rows.push([
-            r.hour, r.topology_category,
-            `"${topoLabel[r.topology_category]||r.topology_category}"`,
-            topoType[r.topology_category]||'unknown',
+            ...label,
             r.Total_P_Loss.toFixed(4),
             r.has_violations ? 'YES' : 'NO', `"${viols}"`,
             '1.06000', ...r.V2_V14.map(v => v.toFixed(5)),
@@ -1329,19 +1557,19 @@ function renderBatchCompareTable(data) {
         if (!row.nr_converged) {
             divergedCount++;
             divergedRows.push({row, idx: i});
-            // Diverged row — show ML result + NR failure indicator
-            tbody.innerHTML += `<tr style="background:rgba(245,158,11,0.04);cursor:pointer"
+            // NR did not converge — potentially insecure; ML values withheld
+            tbody.innerHTML += `<tr style="background:rgba(244,63,94,0.05);cursor:pointer"
                                     data-row-idx="${i}" data-converged="0">
                 <td class="text-muted">${i+1}</td>
                 <td>${getTypeBadgeHTML(row.topology)}</td>
-                <td style="font-family:monospace;color:#06b6d4">${row.ml.Total_P_Loss.toFixed(4)}</td>
+                <td class="text-muted" style="font-family:monospace">—</td>
                 <td style="font-family:monospace">
-                    <span class="badge" style="background:rgba(245,158,11,0.2);color:#fcd34d;border:1px solid rgba(245,158,11,0.35);font-size:0.7rem">
-                        <i class="fas fa-exclamation-triangle me-1"></i>Diverged
+                    <span class="badge" style="background:rgba(244,63,94,0.2);color:#fda4af;border:1px solid rgba(244,63,94,0.35);font-size:0.7rem">
+                        <i class="fas fa-exclamation-triangle me-1"></i>Not converged
                     </span>
                 </td>
                 <td class="text-muted" style="font-family:monospace">—</td>
-                <td style="font-family:monospace;color:#8b5cf6">${(row.ml.Total_Q_Loss ?? 0).toFixed(4)}</td>
+                <td class="text-muted" style="font-family:monospace">—</td>
                 <td class="text-muted" style="font-family:monospace">—</td>
                 <td class="text-muted" style="font-family:monospace">—</td>
                 <td class="text-muted" style="font-family:monospace">—</td>
@@ -1383,8 +1611,8 @@ function renderBatchCompareTable(data) {
                 document.getElementById('cmp-tables-panel').classList.remove('d-none');
                 document.getElementById('nr-diverged-panel').classList.add('d-none');
             } else {
-                renderCompareChartsMLOnly(r.ml);
-                renderNRDivergedPanel({ml: r.ml, nr_error: r.nr_error, topology: r.topology});
+                clearCompareCharts();
+                renderNRDivergedPanel({nr_error: r.nr_error, topology: r.topology});
                 document.getElementById('compare-results-panel').classList.add('d-none');
                 document.getElementById('cmp-tables-panel').classList.add('d-none');
                 document.getElementById('nr-diverged-panel').classList.remove('d-none');
@@ -1405,12 +1633,14 @@ function renderBatchCompareTable(data) {
         if (tr) tr.classList.add('table-active');
     } else if (data.data.length > 0) {
         const r0 = data.data[0];
-        renderCompareChartsMLOnly(r0.ml);
-        renderNRDivergedPanel({ml: r0.ml, nr_error: r0.nr_error, topology: r0.topology});
+        clearCompareCharts();
+        renderNRDivergedPanel({nr_error: r0.nr_error, topology: r0.topology});
+        document.getElementById('compare-results-panel').classList.add('d-none');
+        document.getElementById('cmp-tables-panel').classList.add('d-none');
         document.getElementById('nr-diverged-panel').classList.remove('d-none');
     }
 
-    // If any NR divergences, show the ML-advantage callout section
+    // If NR did not converge for any row, flag those rows as potentially insecure
     renderDivergenceCallout(divergedRows, convergedCount, divergedCount);
 }
 
@@ -1425,31 +1655,22 @@ function renderDivergenceCallout(divergedRows, convergedCount, divergedCount) {
     callout.id = 'cmp-divergence-callout';
     callout.className = 'mt-4';
     callout.innerHTML = `
-        <div class="glass-card p-4" style="border-left:4px solid #f59e0b">
+        <div class="glass-card p-4" style="border-left:4px solid var(--danger)">
             <div class="d-flex align-items-start gap-3 mb-3">
-                <div class="flex-shrink-0" style="width:44px;height:44px;border-radius:10px;background:rgba(245,158,11,0.15);display:flex;align-items:center;justify-content:center">
-                    <i class="fas fa-shield-alt text-warning fa-lg"></i>
+                <div class="flex-shrink-0" style="width:44px;height:44px;border-radius:10px;background:rgba(244,63,94,0.15);display:flex;align-items:center;justify-content:center">
+                    <i class="fas fa-exclamation-triangle text-danger fa-lg"></i>
                 </div>
                 <div class="flex-grow-1">
-                    <h6 class="text-warning mb-1" style="font-weight:800">
-                        ML Model Advantage — NR Divergence Analysis
+                    <h6 class="text-danger mb-1" style="font-weight:800">
+                        Potentially Insecure Operating Points
                     </h6>
                     <p class="mb-0" style="color:#94a3b8;font-size:0.85rem">
-                        Newton-Raphson failed to converge for <strong class="text-warning">${divergedCount}</strong> of ${convergedCount + divergedCount} scenarios
-                        in this batch. The ML ensemble produced valid predictions for <strong class="text-info">all ${convergedCount + divergedCount} scenarios</strong>
-                        — demonstrating a key advantage of data-driven approaches over traditional iterative solvers
-                        under extreme or ill-conditioned operating conditions.
+                        Newton-Raphson did not converge for <strong class="text-danger">${divergedCount}</strong> of ${convergedCount + divergedCount} scenarios
+                        in this batch. Non-convergence can indicate voltage collapse or insufficient reactive power support,
+                        so a valid operating point may not exist. ML predictions for these scenarios are withheld;
+                        they need further investigation.
                     </p>
                 </div>
-                <div class="text-end flex-shrink-0">
-                    <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">ML Coverage</div>
-                    <div class="fw-bold text-info" style="font-family:'JetBrains Mono',monospace;font-size:1.4rem">100%</div>
-                    <div style="font-size:0.68rem;color:#64748b">NR Coverage: ${Math.round(convergedCount/(convergedCount+divergedCount)*100)}%</div>
-                </div>
-            </div>
-
-            <div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:0.75rem">
-                <i class="fas fa-robot me-1 text-info"></i>ML Predictions for Diverged NR Scenarios
             </div>
             <div class="table-responsive">
                 <table class="table table-dark compare-table table-hover mb-0">
@@ -1457,35 +1678,15 @@ function renderDivergenceCallout(divergedRows, convergedCount, divergedCount) {
                         <tr>
                             <th>Row</th>
                             <th>Topology</th>
-                            <th style="color:#06b6d4">ML Total P Loss (MW)</th>
-                            <th style="color:#06b6d4">ML V2 (p.u.)</th>
-                            <th style="color:#06b6d4">ML V14 (p.u.)</th>
-                            <th style="color:#94a3b8">Voltage Violations</th>
-                            <th style="color:#f43f5e">NR Status</th>
+                            <th style="color:#f43f5e">NR Solver Message</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${divergedRows.map(({row, idx}) => {
-                            const ml = row.ml;
-                            const viol = (ml.voltage_violations||[]).length;
-                            const v2   = ml.V2_V14[0]?.toFixed(5) ?? '—';
-                            const v14  = ml.V2_V14[12]?.toFixed(5) ?? '—';
-                            const violHtml = viol === 0
-                                ? '<span class="text-success" style="font-size:0.8rem">✓ None</span>'
-                                : `<span class="text-danger" style="font-size:0.8rem">⚠ ${viol} bus(es)</span>`;
-                            const errTip = row.nr_error ? row.nr_error.replace(/"/g,"'").substring(0,80) : 'Solver diverged';
-                            return `<tr style="background:rgba(245,158,11,0.03)">
+                        ${divergedRows.map(({row, idx}) => `<tr style="background:rgba(244,63,94,0.03)">
                                 <td class="text-muted">${idx+1}</td>
                                 <td>${getTypeBadgeHTML(row.topology)}</td>
-                                <td style="font-family:monospace;color:#06b6d4">${ml.Total_P_Loss.toFixed(4)}</td>
-                                <td style="font-family:monospace;color:#06b6d4">${v2}</td>
-                                <td style="font-family:monospace;color:#06b6d4">${v14}</td>
-                                <td>${violHtml}</td>
-                                <td><span class="badge" style="background:rgba(244,63,94,0.2);color:#fca5a5;border:1px solid rgba(244,63,94,0.35);font-size:0.7rem" title="${errTip}">
-                                    <i class="fas fa-times me-1"></i>Diverged
-                                </span></td>
-                            </tr>`;
-                        }).join('')}
+                                <td style="font-family:monospace;font-size:0.72rem;color:#fda4af">${escapeHTML(row.nr_error || 'Solver did not converge')}</td>
+                            </tr>`).join('')}
                     </tbody>
                 </table>
             </div>

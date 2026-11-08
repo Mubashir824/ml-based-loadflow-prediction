@@ -8,8 +8,9 @@ model is loaded.  This caps peak RAM at "scalers + 1 model" instead of
 "scalers + 7 models", which is what allowed the 7-model dashboard to launch
 on machines that previously OOM'd with all-models-resident.
 
-Pandapower (NR solver) still runs in an isolated subprocess because it is
-not thread-safe and can corrupt shared state.
+Pandapower (NR solver) runs in a pool of worker processes (see nr_solver.py)
+because it is not thread-safe and can corrupt shared state. The same pool
+serves the AI-vs-NR comparison and the NR verification of prediction results.
 """
 
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException
@@ -23,9 +24,17 @@ import joblib
 import io
 import os
 import gc
+import uuid
+import time
+import asyncio
+import threading
 import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
 from typing import Any
+
+import nr_solver
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,6 +44,11 @@ VALID_TOPOLOGY_VALUES = set(range(32))
 MAX_BATCH_ROWS   = 8760
 MAX_COMPARE_ROWS = 10    # NR solver is slow; hard-cap compare-file at 10 rows
 BUS1_VOLTAGE     = 1.06  # IEEE 14-bus slack bus is 1.06 pu
+
+# NR verification: ~45 ms per solve per process, so spread work over cores.
+NR_WORKERS    = max(1, min(8, (os.cpu_count() or 2) // 2))
+NR_CHUNK_ROWS = 20       # rows per worker task; small enough for smooth progress
+NR_KEEP_JOBS  = 5        # finished jobs kept in memory for status polling
 
 # ── Contingency maps ─────────────────────────────────────────────────────────
 CODE_TO_LOAD: dict[int, int] = {
@@ -100,6 +114,7 @@ async def lifespan(app: FastAPI):
           f"{len(MODEL_DEFS)} models will stream-load per request. Server ready.")
     yield
     ML_ASSETS.clear()
+    _shutdown_nr_executor()
 
 
 app = FastAPI(title="Data-Driven Load Flow Analyzer", lifespan=lifespan)
@@ -162,7 +177,10 @@ def run_inference(
     X_num: np.ndarray,
     X_cat: np.ndarray,
     topology_categories: list[int],
+    inputs: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
+    """``inputs`` (n x 23, original precision) is echoed back per row so the
+    client can later send the same scenarios for NR verification."""
 
     X = _preprocess(X_num, X_cat)
     del X_num, X_cat
@@ -215,6 +233,8 @@ def run_inference(
 
         results.append({
             "hour":              i + 1,
+            "source":            "ML",
+            "inputs":            inputs[i].tolist() if inputs is not None else None,
             "topology_category": topo,
             "V2_V14":            v,
             "Angle_2_14":        A_pred[i].tolist(),
@@ -267,69 +287,114 @@ class CompareInput(BaseModel):
         return v
 
 
+class VerifyRow(SingleInput):
+    hour: int
+
+
+class VerifyRequest(BaseModel):
+    rows: list[VerifyRow]
+
+    @field_validator("rows")
+    @classmethod
+    def validate_rows(cls, v: list[VerifyRow]) -> list[VerifyRow]:
+        if not v:
+            raise ValueError("No rows to verify.")
+        if len(v) > MAX_BATCH_ROWS:
+            raise ValueError(f"Too many rows: {len(v)} (max {MAX_BATCH_ROWS}).")
+        return v
+
+
 # ═══════════════════════════════════════════════════════════════
-#  PANDAPOWER WORKER  (isolated subprocess — not thread-safe)
+#  NR SOLVER POOL  (worker processes — pandapower is not thread-safe)
 # ═══════════════════════════════════════════════════════════════
-def _run_pandapower_worker(P_vals: list, Q_vals: list, topo: int) -> dict:
-    """
-    Runs pandapower Newton-Raphson in a fresh subprocess.
-    Returns a dict mirroring the ML result structure (V, angle, P, Q, current).
-    """
-    import pandapower as pp
-    import pandapower.networks as pn
+_nr_executor: ProcessPoolExecutor | None = None
+_nr_executor_lock = threading.Lock()
 
-    net = pn.case14()
 
-    _CTL = {20:1,23:2,24:3,25:4,26:5,27:6,28:7,29:8,30:9,21:10,22:11}
-    _CTLi= {5:1,12:2,13:3,14:4,15:5,16:6,17:7,18:8,19:9,6:10,7:11,8:12,9:13,10:14,11:15}
+def _get_nr_executor() -> ProcessPoolExecutor:
+    """Create the worker pool on first use and keep it for later requests,
+    so pandapower is imported once per worker rather than once per solve."""
+    global _nr_executor
+    with _nr_executor_lock:
+        if _nr_executor is None:
+            _nr_executor = ProcessPoolExecutor(
+                max_workers=NR_WORKERS,
+                mp_context=mp.get_context("spawn"),
+                initializer=nr_solver.init_worker,
+            )
+        return _nr_executor
 
-    if   topo in _CTLi: net.line.at[_CTLi[topo]-1, "in_service"] = False
-    elif topo in _CTL:  net.load.at[_CTL[topo]-1,  "in_service"] = False
-    elif 1 <= topo <= 4: net.gen.at[topo-1, "in_service"] = False
-    elif topo == 31:     net.shunt.at[0,    "in_service"] = False
 
-    net.load["p_mw"]   = P_vals
-    net.load["q_mvar"] = Q_vals
+def _shutdown_nr_executor() -> None:
+    global _nr_executor
+    with _nr_executor_lock:
+        if _nr_executor is not None:
+            _nr_executor.shutdown(wait=False, cancel_futures=True)
+            _nr_executor = None
 
+
+async def _solve_nr_async(rows: list) -> list:
+    """Solve ``(key, features)`` rows in the pool without blocking the event loop."""
     try:
-        pp.runpp(net, algorithm="nr", numba=False)
+        fut = _get_nr_executor().submit(nr_solver.solve_rows, rows)
+        return await asyncio.wrap_future(fut)
+    except BrokenProcessPool:
+        _shutdown_nr_executor()   # a worker died; next request gets a fresh pool
+        raise
+
+
+# ═══════════════════════════════════════════════════════════════
+#  NR VERIFICATION JOBS  (background, polled by the client)
+# ═══════════════════════════════════════════════════════════════
+NR_JOBS: dict[str, dict[str, Any]] = {}
+_nr_jobs_lock = threading.Lock()
+
+
+def _run_nr_job(job: dict[str, Any]) -> None:
+    """Background thread: fan the job's rows out to the pool in chunks and
+    record each result as it arrives."""
+    rows = job["rows"]
+    chunks = [rows[i:i + NR_CHUNK_ROWS] for i in range(0, len(rows), NR_CHUNK_ROWS)]
+    futures = []
+    try:
+        executor = _get_nr_executor()
+        futures = [executor.submit(nr_solver.solve_rows, c) for c in chunks]
+        for fut in as_completed(futures):
+            if job["cancel"]:
+                break
+            for hour, res in fut.result():
+                # Verification only establishes whether an operating point
+                # exists; the ML values stay authoritative, so the NR solution
+                # itself is not sent back.
+                outcome = {"hour": hour, "converged": res["converged"],
+                           "iterations": res.get("iterations"), "error": res.get("error")}
+                with job["lock"]:
+                    job["results"].append(outcome)
+                    job["done"] += 1
+                    if res["converged"]:
+                        job["converged"] += 1
+                    else:
+                        job["not_converged"] += 1
+        job["status"] = "cancelled" if job["cancel"] else "done"
+    except BrokenProcessPool:
+        _shutdown_nr_executor()
+        job["status"], job["error"] = "error", "NR worker process crashed; please retry."
     except Exception as e:
-        return {"error": str(e)}
+        job["status"], job["error"] = "error", str(e)
+    finally:
+        for f in futures:
+            f.cancel()
+        job["finished_at"] = time.time()
+        job["rows"] = None   # inputs no longer needed
 
-    vm = net.res_bus["vm_pu"].values.tolist()
-    va = net.res_bus["va_degree"].values.tolist()
-    il = net.res_line["i_ka"].values.tolist()
-    pf = net.res_line["p_from_mw"].values.tolist()
-    pt = net.res_line["p_to_mw"].values.tolist()
-    pl = net.res_line["pl_mw"].values.tolist()
-    qf = net.res_line["q_from_mvar"].values.tolist()
-    qt = net.res_line["q_to_mvar"].values.tolist()
-    ql = net.res_line["ql_mvar"].values.tolist()
 
-    if topo in _CTLi:
-        idx = _CTLi[topo] - 1
-        for lst in (il, pf, pt, pl, qf, qt, ql):
-            lst[idx] = 0.0
-
-    return {
-        "V_all":        vm,
-        "A_all":        va,
-        "V2_V14":       vm[1:],
-        "Angle_2_14":   va[1:],
-        "P_send":       pf,
-        "P_rec":        pt,
-        "P_loss":       pl,
-        "Total_P_Loss": float(sum(pl)),
-        "Q_send":       qf,
-        "Q_rec":        qt,
-        "Q_loss":       ql,
-        "Total_Q_Loss": float(sum(ql)),
-        "Line_Currents":    il,
-        "Line_Loading_Pct": [round(float(c) * 100, 2) for c in il],
-        "iterations":   int(net._ppc.get("iterations", -1))
-                        if hasattr(net, "_ppc") and net._ppc else -1,
-        "converged":    True,
-    }
+def _prune_nr_jobs() -> None:
+    finished = sorted(
+        (j for j in NR_JOBS.values() if j["status"] != "running"),
+        key=lambda j: j["finished_at"],
+    )
+    for j in finished[:max(0, len(finished) - NR_KEEP_JOBS)]:
+        NR_JOBS.pop(j["id"], None)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -386,7 +451,8 @@ async def health_check():
 async def predict_single(data: SingleInput):
     X_num = np.array([data.features[:22]], dtype=np.float32)
     X_cat = np.array([[data.features[22]]])
-    results = run_inference(X_num, X_cat, [int(data.features[22])])
+    inputs = np.array([data.features], dtype=np.float64)
+    results = run_inference(X_num, X_cat, [int(data.features[22])], inputs)
     return {"status": "success", "total_hours": 1, "data": results}
 
 
@@ -420,11 +486,12 @@ async def predict_batch(file: UploadFile = File(...)):
         X_cat = df.iloc[:, 22].values.reshape(-1, 1)
         if np.any(np.isnan(X_num)):
             raise HTTPException(422, "NaN values in numerical columns.")
+        inputs = df.values.astype(np.float64)
 
         del df, contents
         gc.collect()
 
-        results = run_inference(X_num, X_cat, topo_list)
+        results = run_inference(X_num, X_cat, topo_list, inputs)
         return {"status": "success", "total_hours": len(results), "data": results}
 
     except HTTPException:
@@ -437,50 +504,38 @@ async def predict_batch(file: UploadFile = File(...)):
 @app.post("/compare")
 async def compare_loadflow(data: CompareInput):
     features = data.features
-    P_vals   = features[:11]
-    Q_vals   = features[11:22]
     topo     = int(features[22])
 
-    # ML inference (always succeeds)
+    # NR first: if no operating point exists, the ML output must not be shown.
+    try:
+        [(_, nr)] = await _solve_nr_async([(0, features)])
+    except Exception as e:
+        nr = {"converged": False, "error": f"NR solver failed to run: {e}"}
+
+    if not nr["converged"]:
+        # Non-convergence can indicate voltage collapse or insufficient
+        # reactive support: flag as potentially insecure, no ML numbers.
+        return {
+            "status":       "nr_not_converged",
+            "nr_converged": False,
+            "topology":     topo,
+            "ml":           None,
+            "nr":           None,
+            "nr_error":     nr["error"],
+            "errors":       None,
+        }
+
     X_num = np.array([features[:22]], dtype=np.float32)
     X_cat = np.array([[features[22]]])
     ml = run_inference(X_num, X_cat, [topo])[0]
-
-    # NR solver (isolated subprocess — may diverge)
-    nr_converged = False
-    nr = None
-    nr_error = None
-    try:
-        with mp.get_context("spawn").Pool(1) as pool:
-            nr_raw = pool.apply(_run_pandapower_worker, (P_vals, Q_vals, topo))
-        if "error" in nr_raw:
-            nr_error = nr_raw["error"]
-        else:
-            nr = nr_raw
-            nr_converged = True
-    except Exception as e:
-        nr_error = str(e)
-
-    if nr_converged:
-        return {
-            "status":       "success",
-            "nr_converged": True,
-            "topology":     topo,
-            "ml":           ml,
-            "nr":           nr,
-            "errors":       _compute_errors(ml, nr),
-        }
-    else:
-        # NR diverged — return ML-only result with divergence details
-        return {
-            "status":       "nr_diverged",
-            "nr_converged": False,
-            "topology":     topo,
-            "ml":           ml,
-            "nr":           None,
-            "nr_error":     nr_error,
-            "errors":       None,
-        }
+    return {
+        "status":       "success",
+        "nr_converged": True,
+        "topology":     topo,
+        "ml":           ml,
+        "nr":           nr,
+        "errors":       _compute_errors(ml, nr),
+    }
 
 
 @app.post("/compare_batch")
@@ -517,28 +572,21 @@ async def compare_batch(file: UploadFile = File(...)):
         X_cat = df.iloc[:, 22].values.reshape(-1, 1)
         ml_list = run_inference(X_num, X_cat, topo_list)
 
-        nr_list = []
-        for idx in range(rows_used):
-            try:
-                with mp.get_context("spawn").Pool(1) as pool:
-                    nr_raw = pool.apply(_run_pandapower_worker, (
-                        df.iloc[idx, :11].tolist(),
-                        df.iloc[idx, 11:22].tolist(),
-                        topo_list[idx],
-                    ))
-                nr_list.append(nr_raw)
-            except Exception as e:
-                nr_list.append({"error": str(e)})
+        rows = [(idx, df.iloc[idx, :23].tolist()) for idx in range(rows_used)]
+        try:
+            nr_list = [res for _, res in await _solve_nr_async(rows)]
+        except Exception as e:
+            nr_list = [{"converged": False, "error": f"NR solver failed to run: {e}"}] * rows_used
 
         data_out = []
         for ml, nr in zip(ml_list, nr_list):
-            if "error" in nr:
-                # NR diverged — still include ML result
+            if not nr["converged"]:
+                # NR did not converge — potentially insecure; ML result withheld
                 data_out.append({
                     "topology":     ml["topology_category"],
                     "nr_converged": False,
                     "nr_error":     nr["error"],
-                    "ml":           ml,
+                    "ml":           None,
                     "nr":           None,
                     "errors":       None,
                 })
@@ -563,6 +611,52 @@ async def compare_batch(file: UploadFile = File(...)):
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(500, str(e))
+
+
+# ── NR verification of prediction results ────────────────────────────────────
+# Plain `def` endpoints: FastAPI runs them in its threadpool, so polling stays
+# responsive while the solver pool works.
+
+@app.post("/nr_verify/start")
+def nr_verify_start(req: VerifyRequest):
+    """Start solving the given scenarios with Newton-Raphson in the background."""
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id, "status": "running", "error": None,
+        "total": len(req.rows), "done": 0, "converged": 0, "not_converged": 0,
+        "results": [], "cancel": False, "lock": threading.Lock(),
+        "rows": [(r.hour, r.features) for r in req.rows],
+        "started_at": time.time(), "finished_at": None,
+    }
+    with _nr_jobs_lock:
+        _prune_nr_jobs()
+        NR_JOBS[job_id] = job
+    threading.Thread(target=_run_nr_job, args=(job,), daemon=True).start()
+    return {"job_id": job_id, "total": job["total"], "workers": NR_WORKERS}
+
+
+@app.get("/nr_verify/{job_id}")
+def nr_verify_status(job_id: str, cursor: int = 0):
+    """Progress, plus the results that arrived after ``cursor``."""
+    job = NR_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Unknown or expired verification job.")
+    with job["lock"]:
+        new_results = job["results"][cursor:]
+        snapshot = {k: job[k] for k in ("status", "error", "total", "done",
+                                        "converged", "not_converged")}
+    end = job["finished_at"] or time.time()
+    return {**snapshot, "elapsed_s": round(end - job["started_at"], 1),
+            "cursor": cursor + len(new_results), "results": new_results}
+
+
+@app.post("/nr_verify/{job_id}/cancel")
+def nr_verify_cancel(job_id: str):
+    job = NR_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Unknown or expired verification job.")
+    job["cancel"] = True
+    return {"status": "cancelling"}
 
 
 if __name__ == "__main__":
